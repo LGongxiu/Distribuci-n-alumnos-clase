@@ -15,19 +15,16 @@ TIPOS = {
     "Prefiere no estar con": "E",
 }
 NOMBRE_TIPO = {v: k for k, v in TIPOS.items()}
-COLS = ["Alumno A", "Regla", "Alumno B", "Peso"]
+COLS = ["Alumno A", "Regla", "Alumno B"]
+OBLIG = ["Deben ir juntos", "No pueden ir juntos"]
 
 EJ_ALUMNOS = (
     "Ana, F\nBea, F\nCarlos, M\nDani, M\nEva, F\nFran, M\n"
     "Gus, M\nHugo, M\nIris, F\nJon, M\nKira, F\nLuz, F"
 )
-EJ_REGLAS = [
-    ("Ana", "Prefiere estar con", "Bea", 3),
-    ("Carlos", "Prefiere estar con", "Dani", 2),
-    ("Eva", "No pueden ir juntos", "Fran", 1),
-    ("Gus", "Deben ir juntos", "Hugo", 1),
-    ("Iris", "Prefiere no estar con", "Jon", 2),
-]
+EJ_REGLAS = [("Eva", "No pueden ir juntos", "Fran"), ("Gus", "Deben ir juntos", "Hugo")]
+EJ_PREF = {("Ana", "Bea"), ("Bea", "Ana"), ("Carlos", "Dani"), ("Luz", "Kira")}
+EJ_EVITA = {("Iris", "Jon"), ("Dani", "Hugo")}
 
 
 def reglas_vacias():
@@ -36,7 +33,6 @@ def reglas_vacias():
             "Alumno A": pd.Series(dtype="object"),
             "Regla": pd.Series(dtype="object"),
             "Alumno B": pd.Series(dtype="object"),
-            "Peso": pd.Series(dtype="int64"),
         }
     )
 
@@ -44,6 +40,9 @@ def reglas_vacias():
 def cargar_ejemplo():
     st.session_state.alumnos_txt = EJ_ALUMNOS
     st.session_state.reglas = pd.DataFrame(EJ_REGLAS, columns=COLS)
+    st.session_state.pref = set(EJ_PREF)
+    st.session_state.evita = set(EJ_EVITA)
+    st.session_state.ver = st.session_state.get("ver", 0) + 1
     st.session_state.pop("resultado", None)
 
 
@@ -164,6 +163,28 @@ def etiqueta(res, i):
     return res["nombres"][i] + (f" ({s})" if s else "")
 
 
+def matriz(tag, nombres):
+    """Cuadro alumno x alumno de casillas; devuelve los pares (fila, columna) marcados."""
+    sig = "|".join(nombres)
+    if st.session_state.get(f"base_{tag}_sig") != sig or st.session_state.get(f"base_{tag}_ver") != st.session_state.ver:
+        df = pd.DataFrame(False, index=nombres, columns=nombres)
+        for a, b in st.session_state.get(tag, set()):
+            if a in df.index and b in df.columns:
+                df.loc[a, b] = True
+        st.session_state[f"base_{tag}"] = df
+        st.session_state[f"base_{tag}_sig"] = sig
+        st.session_state[f"base_{tag}_ver"] = st.session_state.ver
+    ed = st.data_editor(
+        st.session_state[f"base_{tag}"],
+        key=f"ed_{tag}_{st.session_state.ver}_{abs(hash(sig))}",
+        column_config={nm: st.column_config.CheckboxColumn(nm, default=False, width="small") for nm in nombres},
+    )
+    actuales = {(a, b) for a in nombres for b in nombres if a != b and bool(ed.loc[a, b])}
+    viejos = {p for p in st.session_state.get(tag, set()) if p[0] not in nombres or p[1] not in nombres}
+    st.session_state[tag] = actuales | viejos
+    return actuales
+
+
 def mostrar(res):
     n = len(res["nombres"])
     filas = informe(res)
@@ -225,11 +246,15 @@ if "alumnos_txt" not in st.session_state:
     st.session_state.alumnos_txt = ""
 if "reglas" not in st.session_state:
     st.session_state.reglas = reglas_vacias()
+if "ver" not in st.session_state:
+    st.session_state.ver = 0
 
 st.title("🪑 Distribuidor de alumnos")
 st.caption("Escribe los alumnos, define quién puede o no ir junto y deja que el programa proponga la distribución.")
 
-tab1, tab2, tab3 = st.tabs(["Alumnos", "Reglas y preferencias", "Distribución"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Alumnos", "Reglas obligatorias", "Preferencias", "No preferencias", "Distribución"]
+)
 
 with tab1:
     st.text_area(
@@ -242,36 +267,44 @@ with tab1:
 
 nombres, sexos = leer_alumnos(st.session_state.alumnos_txt)
 n = len(nombres)
-reglas = []
+idx = {nm: i for i, nm in enumerate(nombres)}
+oblig, pref, evita = [], set(), set()
 
 with tab2:
     if n < 2:
         st.info("Añade al menos 2 alumnos en la pestaña Alumnos.")
     else:
-        st.markdown(
-            "- **Deben ir juntos / No pueden ir juntos**: reglas obligatorias.\n"
-            "- **Prefiere estar con / Prefiere no estar con**: la elección es de A hacia B; "
-            "el peso (1 a 3) indica su importancia."
-        )
+        st.markdown("Reglas que **siempre** se intentan cumplir. Añade una fila por cada regla.")
         editado = st.data_editor(
             st.session_state.reglas,
-            key="ed_reglas",
+            key=f"ed_reglas_{st.session_state.ver}",
             num_rows="dynamic",
             column_config={
                 "Alumno A": st.column_config.SelectboxColumn("Alumno A", options=nombres, required=True),
-                "Regla": st.column_config.SelectboxColumn("Regla", options=list(TIPOS), required=True),
+                "Regla": st.column_config.SelectboxColumn("Regla", options=OBLIG, required=True),
                 "Alumno B": st.column_config.SelectboxColumn("Alumno B", options=nombres, required=True),
-                "Peso": st.column_config.NumberColumn("Peso", min_value=1, max_value=3, step=1, default=1),
             },
         )
-        idx = {nm: i for i, nm in enumerate(nombres)}
         for _, r in editado.iterrows():
             a, b, t = r["Alumno A"], r["Alumno B"], TIPOS.get(r["Regla"])
             if a in idx and b in idx and a != b and t:
-                w = int(r["Peso"]) if pd.notna(r["Peso"]) else 1
-                reglas.append((idx[a], idx[b], t, max(1, min(3, w))))
+                oblig.append((idx[a], idx[b], t, 1))
 
 with tab3:
+    if n < 2:
+        st.info("Añade al menos 2 alumnos en la pestaña Alumnos.")
+    else:
+        st.markdown("Marca lo que cada alumno (**fila**) quiere con otro alumno (**columna**): con quién **prefiere** estar.")
+        pref = matriz("pref", nombres)
+
+with tab4:
+    if n < 2:
+        st.info("Añade al menos 2 alumnos en la pestaña Alumnos.")
+    else:
+        st.markdown("Marca lo que cada alumno (**fila**) quiere con otro alumno (**columna**): con quién **prefiere no** estar.")
+        evita = matriz("evita", nombres)
+
+with tab5:
     if n < 2:
         st.info("Añade al menos 2 alumnos para poder distribuirlos.")
     else:
@@ -304,6 +337,13 @@ with tab3:
             )
         with st.expander("Opciones avanzadas"):
             iters = st.slider("Esfuerzo de búsqueda", 4000, 60000, 20000, step=2000)
+            wp = st.slider("Importancia de las preferencias", 1, 3, 1)
+            we = st.slider("Importancia de las no preferencias", 1, 3, 1)
+        reglas = (
+            list(oblig)
+            + [(idx[a], idx[b], "P", wp) for a, b in pref if a in idx and b in idx]
+            + [(idx[a], idx[b], "E", we) for a, b in evita if a in idx and b in idx]
+        )
 
         if ok_config and st.button("Generar distribución", type="primary"):
             with st.spinner("Calculando…"):
